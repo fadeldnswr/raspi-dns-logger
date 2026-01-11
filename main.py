@@ -26,6 +26,15 @@ QUERY_RE = re.compile(
   r'dnsmasq\[(?P<pid>\d+)\]:\s+query\[(?P<qtype>[A-Z0-9]+)\]\s+'
   r'(?P<domain>\S+)\s+from\s+(?P<client_ip>\d{1,3}(?:\.\d{1,3}){3})'
 )
+FORWARDED_RE = re.compile(
+  r'^(?P<mon>\w{3})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+'
+  r'dnsmasq\[(?P<pid>\d+)\]:\s+forwarded\s+(?P<domain>\S+)\s+to\s+(?P<upstream>\S+)'
+)
+
+REPLY_RE = re.compile(
+  r'^(?P<mon>\w{3})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+'
+  r'dnsmasq\[(?P<pid>\d+)\]:\s+reply\s+(?P<domain>\S+)\s+is\s+(?P<answer>.+)$'
+)
 
 # Define the file status from LOG PATH
 try:
@@ -61,49 +70,116 @@ last_ts = None
 with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as log_file:
   # Seek to last offset
   log_file.seek(last_offset)
+  
+  # Define pending dictionary for forwarded and reply events
+  pending: dict = {}
   while True:
     
     # Read line from log file
     line = log_file.readline()
+    line_s = line.strip()
     
     # Check if the line is not empty
     if not line:
       break
     
-    # Match the line with regex
-    match = QUERY_RE.match(line)
-    if not match:
-      continue
-    
-    # Parse timestamp
-    parse_ts = dns.parse_ts(match.group("mon"), match.group("day"), match.group("time"))
-    last_ts = parse_ts
-    
-    # Hash client IP
-    hashed_ip = dns.hash_client(match.group("client_ip"))
-    
-    # Create hash lib for hash event
-    raw = line.strip().encode("utf-8")
-    hashed_event = hashlib.sha256(raw).hexdigest()
-
-    # Create event dictionary
-    events.append({
+    # Make query match
+    make_query = QUERY_RE.match(line_s)
+    if make_query:
+      parse_ts = dns.parse_ts(
+        make_query.group("mon"),
+        make_query.group("day"),
+        make_query.group("time")
+      )
+      last_ts = parse_ts
+      
+      # Define DNS event
+      client_ip = make_query.group("client_ip")
+      client_id = dns.hash_client(client_ip)
+      domain = make_query.group("domain").lower()
+      pid = int(make_query.group("pid"))
+      qtype = make_query.group("qtype")
+      
+      # Parse ts and define pending key
+      ts_key = parse_ts.replace(microsecond=0).isoformat()
+      pend_key = (pid, domain, ts_key)
+      pend = pending.get(pend_key, {})
+      
+      # Encode raw line and hash it
+      raw = line_s.encode("utf-8")
+      hashed = hashlib.sha256(raw).hexdigest()
+      
+      # Append event to events list
+      events.append({
       "ts": parse_ts.isoformat(),
       "source_host": SOURCE_HOST,
-      "client_ip": match.group("client_ip"),
-      "client_id": hashed_ip,
-      "qtype": match.group("qtype"),
-      "domain": match.group("domain").lower(),
-      "pid": int(match.group("pid")),
-      "raw_line": line.strip(),
-      "event_hash": hashed_event
-    })
+      "client_ip": client_ip,
+      "client_id": client_id,
+      "qtype": qtype,
+      "domain": domain,
+      "pid": pid,
+      "raw_line": line_s,
+      "event_hash": hashed,
+      "upstream": pend.get("upstream"),
+      "result": pend.get("result"),
+      "answer": pend.get("answer"),
+      })
+      
+      # Check if batch size is reached
+      if len(events) >= BATCH_SIZE:
+        supabase_handler.insert_events(events)
+        events.clear()
+      continue
+      
+    # Make forwarded match
+    make_forward = FORWARDED_RE.match(line_s)
+    if make_forward:
+      parse_ts = dns.parse_ts(
+        make_forward.group("mon"),
+        make_forward.group("day"),
+        make_forward.group("time")
+      )
+      # Define DNS forwarded event
+      domain = make_forward.group("domain").lower()
+      pid = int(make_forward.group("pid"))
+      upstream = make_forward.group("upstream").split("#")[0]
+      
+      # Parse ts and define pending key
+      ts_key = parse_ts.replace(microsecond=0).isoformat()
+      pend_key = (pid, domain, ts_key)
+      pending.setdefault(pend_key, {})["upstream"] = upstream
+      continue
     
-    # Check if batch size is reached
-    if len(events) >= BATCH_SIZE:
-      supabase_handler.insert_events(events)
-      events.clear()
-  
+    # Make reply match
+    reply_match = REPLY_RE.match(line_s)
+    if reply_match:
+      parse_ts = dns.parse_ts(
+        reply_match.group("mon"),
+        reply_match.group("day"),
+        reply_match.group("time")
+      )
+      # Define DNS reply event
+      domain = reply_match.group("domain").lower()
+      pid = int(reply_match.group("pid"))
+      answer = reply_match.group("answer").strip()
+      
+      # Check if answer indicates NXDOMAIN
+      if "NXDOMAIN" in answer:
+        result = "NXDOMAIN"
+      elif "NODATA" in answer:
+        result = "NODATA"
+      elif "CNAME" in answer:
+        result = "CNAME"
+      else:
+        result = "NOERROR"
+      
+      # Parse ts and define pending key
+      ts_key = parse_ts.replace(microsecond=0).isoformat()
+      pend_key = (pid, domain, ts_key)
+      pending.setdefault(pend_key, {})["answer"] = answer
+      pending.setdefault(pend_key, {})["result"] = result
+      continue
+    
   # Flush remaining events
   if events:
     supabase_handler.insert_events(events)
