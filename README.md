@@ -51,6 +51,7 @@ DNS logs are parsed from **dnsmasq** and stored in PostgreSQL with the following
 - Python 3.9
 - **dnsmasq** installed and running
 - Supabase or other PostgreSQL based database 
+- Set your devices DNS into Raspberry Pi's IP address
 
 ### Clone Repository
 ```
