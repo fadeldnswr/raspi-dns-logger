@@ -17,6 +17,7 @@ Using a data-driven approach, where DNS behavior is treated as a lightweight pro
 - Build a lightweight, reproducible, and explainable edge-to-database telemetry pipeline
 
 ## System Architecture
+![alt text](image.png)
 
 ## Data Collected
 DNS logs are parsed from **dnsmasq** and stored in PostgreSQL with the following fields:
@@ -43,7 +44,6 @@ DNS logs are parsed from **dnsmasq** and stored in PostgreSQL with the following
 - NXDOMAIN burst detection
 - Periodic DNS behavior (possible beaconing)
 - Suspicious domain access patterns
-> This system provides *security signals*, not full intrusion detection
 
 ## Getting Started
 ### Prerequisites
